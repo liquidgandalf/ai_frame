@@ -83,7 +83,7 @@ video_mute = config['video'].getboolean('mute')
 media = {}
 
 # Display mode
-display_mode = 'calibrate'  # 'calibrate' or 'media'
+display_mode = config['display'].get('mode', 'calibrate')  # 'calibrate' or 'media'
 
 def load_media():
     # Load existing media from uploads_dir
@@ -119,7 +119,10 @@ def login():
         if user_found:
             session['logged_in'] = True
             session['username'] = user
-            return redirect(url_for('calibrate'))
+            if display_mode == 'media':
+                return redirect(url_for('media'))
+            else:
+                return redirect(url_for('calibrate'))
         # If no users, allow config
         elif not users and user == username and pwd_hash == password_hash:
             session['logged_in'] = True
@@ -228,6 +231,7 @@ def calibrate():
     <button onclick="adjust(0,10)">Down 10px</button><br>
     <button onclick="adjust(0,0,true)">Reset to 0</button>
     </div>
+    <br><button onclick="commit()">Commit Calibration</button>
     <br><a href="/switch_mode/media">Switch to Media Mode</a> | <a href="/media">Admin Media Upload</a>
     <script>
     function adjust(dx, dy, reset=false) {
@@ -235,6 +239,11 @@ def calibrate():
             fetch('/adjust_offset?reset=1').then(() => location.reload());
         } else {
             fetch(`/adjust_offset?dx=${dx}&dy=${dy}`).then(() => location.reload());
+        }
+    }
+    function commit() {
+        if (confirm('Commit current calibration and switch to media mode?')) {
+            fetch('/commit_calibration').then(() => location.href='/media');
         }
     }
     </script>
@@ -273,7 +282,21 @@ def switch_mode(mode):
     global display_mode
     if mode in ['calibrate', 'media']:
         display_mode = mode
+        config.set('display', 'mode', display_mode)
+        with open(config_path, 'w') as f:
+            config.write(f)
     return redirect(request.referrer or url_for('calibrate'))
+
+@app.route('/commit_calibration')
+def commit_calibration():
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+    global display_mode
+    display_mode = 'media'
+    config.set('display', 'mode', 'media')
+    with open(config_path, 'w') as f:
+        config.write(f)
+    return redirect(url_for('media'))
 
 @app.route('/media', methods=['GET', 'POST'])
 def media_page():
@@ -324,7 +347,7 @@ def media_page():
                 html += f'<video class="media" style="left: {hole["x_px"] - hole["w_px"]/2}px; top: {hole["y_px"] - hole["h_px"]/2}px; width: {hole["w_px"]}px; height: {hole["h_px"]}px;" {"loop" if video_loop else ""} {"muted" if video_mute else ""} autoplay><source src="/media_file/{hole["id"]}" type="video/{ext[1:]}"></video>'
             else:
                 html += f'<img class="media" style="left: {hole["x_px"] - hole["w_px"]/2}px; top: {hole["y_px"] - hole["h_px"]/2}px; width: {hole["w_px"]}px; height: {hole["h_px"]}px;" src="/media_file/{hole["id"]}">'
-    html += '<br><a href="/switch_mode/calibrate">Switch to Calibration Mode</a></body></html>'
+    html += '<br><a href="/switch_mode/calibrate">Reconfigure Layout</a></body></html>'
     return html
 
 @app.route('/media_file/<int:hole_id>')
