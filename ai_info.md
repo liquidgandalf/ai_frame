@@ -41,11 +41,15 @@ Copy code
 ### 2️⃣ Main Playback App
 - **Purpose:** Display media inside the cut-outs.
 - **Features:**
-  - Flask web interface.
+  - Flask web interface with user management.
+  - Initial login uses default admin/password from config.cfg, redirects to create first admin user, then disables default login.
+  - Users stored in users.json with hashed passwords.
   - Reads login credentials and paths from `config.cfg`.
-  - **First run = Calibration mode**  
-    - Shows numbered yellow squares at cut-out positions, with a light “road-grid” background to aid alignment.
-  - **After calibration = Media mode**  
+  - **Calibration mode** (default on first login)
+    - Shows numbered yellow squares at cut-out positions, with a light "road-grid" background to aid alignment.
+    - Adjustable offset for precise alignment, saved to config.
+    - Commit calibration to switch to media mode permanently.
+  - **Media mode**
     - Upload photos or short videos for each frame number.
     - Uploads stored neatly:
 
@@ -54,14 +58,21 @@ Copy code
       ```
 
     - Plays assigned media in each window, looping videos where applicable.
+    - Option to reconfigure layout back to calibration mode.
 
 ### 3️⃣ Configuration File (`config.cfg`)
 Stores:
 - Frame dimensions (width/height).
 - Hole coordinates & sizes.
-- Username + hashed password for the Flask UI.
+- Default username + hashed password for initial setup.
+- Display mode (calibrate or media).
+- Offset values for calibration.
 - **Uploads directory path** (default: `./uploads`).
 - Optional video behaviour (loop, mute, etc.).
+
+### 4️⃣ Users File (`users.json`)
+Stores user accounts created after initial setup:
+- Username, hashed password, role (admin).
 
 Example:
 

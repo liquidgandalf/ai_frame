@@ -9,3 +9,9 @@
 - [x] Modify config_creator.py: Revert to all yellow cut-outs, black background, wood-colored frame, add edge resizing for cut-outs.
 
 - [x] Build Flask app for media playback: Created program/app.py with authentication, calibration mode with adjustable offset for alignment, and media mode for uploading and displaying photos/videos in cut-out positions, stored in organized directory structure.
+
+- [x] Initialize git repository and push initial commit to GitHub repo.
+
+- [x] Implement user management system: Add JSON-based user storage, admin user creation, disable default config login after adding users, use session username for uploads.
+
+- [x] Add calibration commit functionality: Allow committing calibration to switch to media mode, save mode to config, redirect login to media mode by default with option to reconfigure layout.
