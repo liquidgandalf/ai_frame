@@ -10,6 +10,7 @@ import hashlib
 import threading
 import pygame
 import sys
+import json
 
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'  # Change in production
@@ -53,6 +54,21 @@ for key, value in config['holes'].items():
 username = config['server']['username']
 password_hash = config['server']['password_hash']
 
+# User management
+users_file = os.path.join(os.path.dirname(__file__), '..', 'users.json')
+
+def load_users():
+    if os.path.exists(users_file):
+        with open(users_file) as f:
+            return json.load(f)
+    return []
+
+def save_users(users):
+    with open(users_file, 'w') as f:
+        json.dump(users, f, indent=4)
+
+users = load_users()
+
 # Paths
 uploads_dir = config['paths']['uploads_dir']
 if not os.path.isabs(uploads_dir):
@@ -93,9 +109,22 @@ def login():
     if request.method == 'POST':
         user = request.form['username']
         pwd = request.form['password']
-        if user == username and hashlib.sha256(pwd.encode()).hexdigest() == password_hash:
+        pwd_hash = hashlib.sha256(pwd.encode()).hexdigest()
+        # Check users first
+        user_found = None
+        for u in users:
+            if u['username'] == user and u['password_hash'] == pwd_hash:
+                user_found = u
+                break
+        if user_found:
             session['logged_in'] = True
+            session['username'] = user
             return redirect(url_for('calibrate'))
+        # If no users, allow config
+        elif not users and user == username and pwd_hash == password_hash:
+            session['logged_in'] = True
+            session['username'] = user
+            return redirect(url_for('add_user'))
         else:
             flash('Invalid credentials')
     return render_template_string('''
@@ -108,6 +137,45 @@ def login():
         Username: <input type="text" name="username"><br>
         Password: <input type="password" name="password"><br>
         <input type="submit" value="Login">
+    </form>
+    {% with messages = get_flashed_messages() %}
+        {% if messages %}
+            <ul>
+            {% for message in messages %}
+                <li>{{ message }}</li>
+            {% endfor %}
+            </ul>
+        {% endif %}
+    {% endwith %}
+    </body>
+    </html>
+    ''')
+
+@app.route('/add_user', methods=['GET', 'POST'])
+def add_user():
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+    if request.method == 'POST':
+        new_user = request.form['username']
+        new_pwd = request.form['password']
+        # Check if user exists
+        if any(u['username'] == new_user for u in users):
+            flash('User already exists')
+        else:
+            users.append({'username': new_user, 'password_hash': hashlib.sha256(new_pwd.encode()).hexdigest(), 'role': 'admin'})
+            save_users(users)
+            flash('Admin user added successfully')
+            return redirect(url_for('calibrate'))
+    return render_template_string('''
+    <!DOCTYPE html>
+    <html>
+    <head><title>Add Admin User</title></head>
+    <body>
+    <h1>Add New Admin User</h1>
+    <form method="post">
+        Username: <input type="text" name="username" required><br>
+        Password: <input type="password" name="password" required><br>
+        <input type="submit" value="Add User">
     </form>
     {% with messages = get_flashed_messages() %}
         {% if messages %}
@@ -216,9 +284,9 @@ def media_page():
         file = request.files['file']
         if file:
             filename = secure_filename(file.filename)
-            # Create directory structure: uploads_dir/hole_id/year/month/day/fileid_filename
+            # Create directory structure: uploads_dir/user/year/month/day/fileid_filename
             now = datetime.now()
-            user = username  # or from session
+            user = session['username']
             path = os.path.join(uploads_dir, user, str(now.year), f"{now.month:02d}", f"{now.day:02d}")
             os.makedirs(path, exist_ok=True)
             fileid = f"{hole_id}_{filename}"
