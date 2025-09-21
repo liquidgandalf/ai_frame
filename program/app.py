@@ -385,30 +385,34 @@ def media_page():
             add_media_to_db(filepath, user=session.get('username'))
             load_media()  # Reload media list
     # Display page
+    scale = min(1.0, window.innerWidth / screen_width_px, window.innerHeight / screen_height_px)  # but since it's server side, assume 0.5 or calculate client side
+    # For simplicity, use fixed scale, say 0.3 for phone
+    phone_scale = 0.3
     html = f'''
     <!DOCTYPE html>
     <html>
-    <head><title>Media Mode</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
-    body {{ margin: 0; background: black; color: white; font-family: Arial, sans-serif; }}
-    .media {{ position: absolute; }}
-    video {{ width: 100%; height: 100%; object-fit: cover; }}
-    img {{ width: 100%; height: 100%; object-fit: cover; }}
-    .upload-form {{ position: fixed; top: 0; left: 0; right: 0; background: rgba(0,0,0,0.8); padding: 10px; z-index: 10; }}
+    <head><title>Media Mode</title><meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"><style>
+    body {{ margin: 0; background: black; color: white; font-family: Arial, sans-serif; overflow: hidden; }}
+    .upload-form {{ position: fixed; top: 0; left: 0; right: 0; background: rgba(0,0,0,0.9); padding: 10px; z-index: 10; display: none; }}
     .upload-form select, .upload-form input[type="file"], .upload-form input[type="submit"] {{ margin: 5px; padding: 8px; font-size: 16px; }}
     .logout {{ position: absolute; top: 10px; right: 10px; }}
-    @media (max-width: 600px) {{ .upload-form {{ padding: 5px; }} .upload-form select, .upload-form input {{ font-size: 14px; }} }}
+    .tv-layout {{ position: relative; width: {screen_width_px * phone_scale}px; height: {screen_height_px * phone_scale}px; margin: 50px auto; background: #111; border: 2px solid white; }}
+    .hole {{ position: absolute; }}
+    .hole img, .hole video {{ width: 100%; height: 100%; object-fit: cover; }}
+    .show-upload {{ position: fixed; top: 10px; left: 10px; z-index: 11; }}
+    @media (orientation: landscape) {{ body {{ /* landscape styles */ }} }}
     </style></head>
     <body>
-    <div class="upload-form">
+    <button class="show-upload" onclick="toggleUpload()">Upload Media</button>
+    <a href="/logout" class="logout">Logout</a>
+    <div class="upload-form" id="uploadForm">
     <h2>Upload Media</h2>
     <form method="post" enctype="multipart/form-data">
         File: <input type="file" name="file" accept="image/*,video/*">
         <input type="submit" value="Upload">
     </form>
-    <a href="/logout" class="logout">Logout</a>
     </div>
-    <h3>Current Frames</h3>
-    <div style="display: flex; flex-wrap: wrap;">
+    <div class="tv-layout" id="tvLayout">
     '''
     for hole in holes:
         index = current_image_index[hole['id']]
@@ -416,34 +420,46 @@ def media_page():
             filepath = media[index]
             filename = os.path.basename(filepath)
             ext = os.path.splitext(filepath)[1].lower()
+            x = hole['x_px'] * phone_scale
+            y = hole['y_px'] * phone_scale
+            w = hole['w_px'] * phone_scale
+            h = hole['h_px'] * phone_scale
             if ext in ['.mp4', '.webm', '.ogg']:
-                thumb = f'<video id="thumb-{hole["id"]}" style="width: 100px; height: 100px; margin: 5px;" controls><source src="/media_file_all/{index}" type="video/{ext[1:]}"></video>'
+                thumb = f'<video id="thumb-{hole["id"]}" controls><source src="/media_file_all/{index}" type="video/{ext[1:]}"></video>'
             else:
-                thumb = f'<img id="thumb-{hole["id"]}" style="width: 100px; height: 100px; margin: 5px; object-fit: cover;" src="/media_file_all/{index}" alt="{filename}">'
-            html += f'<div id="hole-{hole["id"]}" style="text-align: center; margin: 10px;"><p>Hole {hole["id"]}</p>{thumb}<br><button id="bin-{hole["id"]}" onclick="deleteMedia({index})">Bin</button> <button id="rotate-{hole["id"]}" onclick="rotateMedia({index})">Rotate 90 Deg</button></div>'
+                thumb = f'<img id="thumb-{hole["id"]}" src="/media_file_all/{index}" alt="{filename}">'
+            html += f'<div id="hole-{hole["id"]}" class="hole" style="left: {x - w/2}px; top: {y - h/2}px; width: {w}px; height: {h}px;">{thumb}</div>'
     html += '''
     </div>
-    <h3>Uploaded Media ({len(media)} files)</h3>
-    <div style="display: flex; flex-wrap: wrap;">
-    '''
-    for i, filepath in enumerate(media[:20]):  # Show first 20 thumbnails
-        ext = os.path.splitext(filepath)[1].lower()
-        filename = os.path.basename(filepath)
-        if ext in ['.mp4', '.webm', '.ogg']:
-            html += f'<video style="width: 100px; height: 100px; margin: 5px;" controls><source src="/media_file_all/{i}" type="video/{ext[1:]}"></video>'
-        else:
-            html += f'<img style="width: 100px; height: 100px; margin: 5px; object-fit: cover;" src="/media_file_all/{i}" alt="{filename}">'
-    html += f'''</div><br><a href="/switch_mode/calibrate">Reconfigure Layout</a>
+    <div style="text-align: center; margin-top: 10px;">
+    <a href="/switch_mode/calibrate">Reconfigure Layout</a>
+    </div>
     <script>
     let mediaLength = {len(media)};
+    let longPressTimer;
+    let longPressed = false;
+    let startX, startY;
+    let currentIndex;
+
+    function toggleUpload() {{
+        let form = document.getElementById('uploadForm');
+        form.style.display = form.style.display === 'none' ? 'block' : 'none';
+    }}
+
     function deleteMedia(index) {{
         if (confirm('Delete this media?')) {{
             fetch(`/delete_media/${{index}}`).then(() => location.reload());
         }}
     }}
-    function rotateMedia(index) {{
-        fetch(`/rotate_media/${{index}}`).then(() => location.reload());
+
+    function rotateLeft(index) {{
+        fetch(`/rotate_media/${{index}}`).then(() => updateFrames());
     }}
+
+    function rotateRight(index) {{
+        fetch(`/rotate_right/${{index}}`).then(() => updateFrames());
+    }}
+
     function updateFrames() {{
         fetch('/current_indices')
         .then(r => r.json())
@@ -458,12 +474,56 @@ def media_page():
                         thumb.querySelector('source').src = '/media_file_all/' + index;
                         thumb.load();
                     }}
-                    document.getElementById('bin-' + holeId).onclick = () => deleteMedia(index);
-                    document.getElementById('rotate-' + holeId).onclick = () => rotateMedia(index);
                 }}
             }}
         }});
     }}
+
+    function handleTouchStart(event, holeId) {{
+        startX = event.touches[0].clientX;
+        startY = event.touches[0].clientY;
+        longPressed = false;
+        longPressTimer = setTimeout(() => {{
+            longPressed = true;
+        }}, 500);
+    }}
+
+    function handleTouchMove(event) {{
+        if (!longPressed) return;
+        event.preventDefault();
+    }}
+
+    function handleTouchEnd(event, holeId) {{
+        clearTimeout(longPressTimer);
+        if (!longPressed) return;
+        let endX = event.changedTouches[0].clientX;
+        let endY = event.changedTouches[0].clientY;
+        let dx = endX - startX;
+        let dy = endY - startY;
+        fetch('/current_indices')
+        .then(r => r.json())
+        .then(indices => {{
+            let index = indices[holeId];
+            if (Math.abs(dx) > Math.abs(dy)) {{
+                if (dx > 50) {{
+                    rotateRight(index);
+                }} else if (dx < -50) {{
+                    rotateLeft(index);
+                }}
+            }} else {{
+                if (dy > 50) {{
+                    deleteMedia(index);
+                }} else if (dy < -50) {{
+                    // further options, for now rotate 180
+                    fetch(`/rotate_media/${{index}}`).then(() => fetch(`/rotate_media/${{index}}`).then(() => updateFrames()));
+                }}
+            }}
+        }});
+    }}
+
+    // Add listeners to holes
+    {''.join([f"document.getElementById('hole-{hole['id']}').addEventListener('touchstart', (e) => handleTouchStart(e, {hole['id']})); document.getElementById('hole-{hole['id']}').addEventListener('touchmove', handleTouchMove); document.getElementById('hole-{hole['id']}').addEventListener('touchend', (e) => handleTouchEnd(e, {hole['id']}));" for hole in holes])}
+
     setInterval(updateFrames, 5000);
     </script>
     </body></html>'''
@@ -513,7 +573,25 @@ def rotate_media(index):
         filepath = media[index]
         # load image
         img = Image.open(filepath)
-        img = img.rotate(-90, expand=True)  # rotate 90 deg clockwise
+        img = img.rotate(-90, expand=True)  # rotate 90 deg left
+        img.save(filepath)
+        # update db rotation to 0
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute('UPDATE media SET rotation = 0 WHERE filepath = ?', (filepath,))
+        conn.commit()
+        conn.close()
+    return '', 204
+
+@app.route('/rotate_right/<int:index>')
+def rotate_right(index):
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+    if 0 <= index < len(media):
+        filepath = media[index]
+        # load image
+        img = Image.open(filepath)
+        img = img.rotate(90, expand=True)  # rotate 90 deg right
         img.save(filepath)
         # update db rotation to 0
         conn = sqlite3.connect(db_path)
