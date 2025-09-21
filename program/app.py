@@ -5,15 +5,24 @@ import os
 import configparser
 from flask import Flask, request, render_template_string, redirect, url_for, session, flash, send_file
 from werkzeug.utils import secure_filename
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
 import threading
 import pygame
 import sys
 import json
+import socket
+import qrcode
+from PIL import Image
+from flask_session import Session
+import sqlite3
+import random
 
 app = Flask(__name__)
 app.secret_key = 'supersecretkey'  # Change in production
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=24)
+app.config['SESSION_TYPE'] = 'filesystem'
+Session(app)
 
 # Load config
 config = configparser.ConfigParser()
@@ -50,6 +59,9 @@ for key, value in config['holes'].items():
         'h_px': float(h) * scale_y
     })
 
+# Initialize image indices
+current_image_index = {hole['id']: 0 for hole in holes}
+
 # Server settings
 username = config['server']['username']
 password_hash = config['server']['password_hash']
@@ -75,34 +87,85 @@ if not os.path.isabs(uploads_dir):
     uploads_dir = os.path.join(os.path.dirname(__file__), '..', uploads_dir)
 os.makedirs(uploads_dir, exist_ok=True)
 
+# Database
+db_path = os.path.join(os.path.dirname(__file__), '..', 'media.db')
+
+def init_db():
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS media (
+        id INTEGER PRIMARY KEY,
+        filepath TEXT UNIQUE,
+        user TEXT,
+        rotation INTEGER,
+        crop_x REAL, crop_y REAL, crop_w REAL, crop_h REAL,
+        frames TEXT
+    )''')
+    conn.commit()
+    conn.close()
+
+init_db()
+
+def add_media_to_db(filepath, user=None, rotation=None, crop_x=None, crop_y=None, crop_w=None, crop_h=None, frames='all'):
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    try:
+        c.execute('INSERT OR IGNORE INTO media (filepath, user, rotation, crop_x, crop_y, crop_w, crop_h, frames) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                  (filepath, user, rotation, crop_x, crop_y, crop_w, crop_h, frames))
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"Database error: {e}")
+    finally:
+        conn.close()
+
 # Video settings
 video_loop = config['video'].getboolean('loop')
 video_mute = config['video'].getboolean('mute')
 
-# Media storage: dict of hole_id to file_path
-media = {}
+# Media storage: list of file_paths
+media = []
+current_hole_to_update = 0
+last_cycle_time = datetime.now()
 
 # Display mode
 display_mode = config['display'].get('mode', 'calibrate')  # 'calibrate' or 'media'
 
+def get_local_ip():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+    except:
+        ip = "127.0.0.1"
+    finally:
+        s.close()
+    return ip
+
 def load_media():
-    # Load existing media from uploads_dir
-    # Scan recursively for files, parse hole_id from filename
-    media_temp = {}
+    # Load all media files from uploads_dir
+    media_temp = []
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
     for root, dirs, files in os.walk(uploads_dir):
         for file in files:
-            if '_' in file:
-                try:
-                    hole_id = int(file.split('_')[0])
-                    filepath = os.path.join(root, file)
-                    if hole_id not in media_temp or os.path.getmtime(filepath) > os.path.getmtime(media_temp[hole_id]):
-                        media_temp[hole_id] = filepath
-                except ValueError:
-                    pass
+            filepath = os.path.join(root, file)
+            media_temp.append(filepath)
+            # Check if in db, if not add
+            c.execute('SELECT id FROM media WHERE filepath = ?', (filepath,))
+            if not c.fetchone():
+                add_media_to_db(filepath)
+    conn.close()
+    # Sort by modification time, newest first
+    media_temp.sort(key=lambda f: os.path.getmtime(f), reverse=True)
     global media
     media = media_temp
 
 load_media()
+
+# Initialize with random indices
+if media:
+    for hole in holes:
+        current_image_index[hole['id']] = random.randint(0, len(media)-1)
 
 @app.route('/', methods=['GET', 'POST'])
 def login():
@@ -119,8 +182,9 @@ def login():
         if user_found:
             session['logged_in'] = True
             session['username'] = user
+            session.permanent = True
             if display_mode == 'media':
-                return redirect(url_for('media'))
+                return redirect(url_for('media_page'))
             else:
                 return redirect(url_for('calibrate'))
         # If no users, allow config
@@ -167,6 +231,9 @@ def add_user():
         else:
             users.append({'username': new_user, 'password_hash': hashlib.sha256(new_pwd.encode()).hexdigest(), 'role': 'admin'})
             save_users(users)
+            session['logged_in'] = True
+            session['username'] = new_user
+            session.permanent = True
             flash('Admin user added successfully')
             return redirect(url_for('calibrate'))
     return render_template_string('''
@@ -296,59 +363,117 @@ def commit_calibration():
     config.set('display', 'mode', 'media')
     with open(config_path, 'w') as f:
         config.write(f)
-    return redirect(url_for('media'))
+    return redirect(url_for('media_page'))
 
 @app.route('/media', methods=['GET', 'POST'])
 def media_page():
     if not session.get('logged_in'):
         return redirect(url_for('login'))
     if request.method == 'POST':
-        hole_id = int(request.form['hole_id'])
         file = request.files['file']
         if file:
             filename = secure_filename(file.filename)
-            # Create directory structure: uploads_dir/user/year/month/day/fileid_filename
+            # Create directory structure: uploads_dir/user/year/month/day/timestamp_filename
             now = datetime.now()
             user = session['username']
             path = os.path.join(uploads_dir, user, str(now.year), f"{now.month:02d}", f"{now.day:02d}")
             os.makedirs(path, exist_ok=True)
-            fileid = f"{hole_id}_{filename}"
+            timestamp = int(now.timestamp() * 1000)  # milliseconds
+            fileid = f"{timestamp}_{filename}"
             filepath = os.path.join(path, fileid)
             file.save(filepath)
-            media[hole_id] = filepath
+            add_media_to_db(filepath, user=session.get('username'))
+            load_media()  # Reload media list
     # Display page
-    html = '''
+    html = f'''
     <!DOCTYPE html>
     <html>
-    <head><title>Media Mode</title><style>
-    body { margin: 0; background: black; }
-    .media { position: absolute; }
-    video { width: 100%; height: 100%; object-fit: cover; }
-    img { width: 100%; height: 100%; object-fit: cover; }
+    <head><title>Media Mode</title><meta name="viewport" content="width=device-width, initial-scale=1.0"><style>
+    body {{ margin: 0; background: black; color: white; font-family: Arial, sans-serif; }}
+    .media {{ position: absolute; }}
+    video {{ width: 100%; height: 100%; object-fit: cover; }}
+    img {{ width: 100%; height: 100%; object-fit: cover; }}
+    .upload-form {{ position: fixed; top: 0; left: 0; right: 0; background: rgba(0,0,0,0.8); padding: 10px; z-index: 10; }}
+    .upload-form select, .upload-form input[type="file"], .upload-form input[type="submit"] {{ margin: 5px; padding: 8px; font-size: 16px; }}
+    .logout {{ position: absolute; top: 10px; right: 10px; }}
+    @media (max-width: 600px) {{ .upload-form {{ padding: 5px; }} .upload-form select, .upload-form input {{ font-size: 14px; }} }}
     </style></head>
     <body>
-    <h1>Media Mode</h1>
+    <div class="upload-form">
+    <h2>Upload Media</h2>
     <form method="post" enctype="multipart/form-data">
-        Hole ID: <select name="hole_id">
-    '''
-    for hole in holes:
-        html += f'<option value="{hole["id"]}">{hole["id"]}</option>'
-    html += '''
-        </select>
-        File: <input type="file" name="file">
+        File: <input type="file" name="file" accept="image/*,video/*">
         <input type="submit" value="Upload">
     </form>
+    <a href="/logout" class="logout">Logout</a>
+    </div>
+    <h3>Current Frames</h3>
+    <div style="display: flex; flex-wrap: wrap;">
     '''
     for hole in holes:
-        if hole['id'] in media:
-            filepath = media[hole['id']]
+        index = current_image_index[hole['id']]
+        if index < len(media):
+            filepath = media[index]
+            filename = os.path.basename(filepath)
             ext = os.path.splitext(filepath)[1].lower()
             if ext in ['.mp4', '.webm', '.ogg']:
-                html += f'<video class="media" style="left: {hole["x_px"] - hole["w_px"]/2}px; top: {hole["y_px"] - hole["h_px"]/2}px; width: {hole["w_px"]}px; height: {hole["h_px"]}px;" {"loop" if video_loop else ""} {"muted" if video_mute else ""} autoplay><source src="/media_file/{hole["id"]}" type="video/{ext[1:]}"></video>'
+                thumb = f'<video id="thumb-{hole["id"]}" style="width: 100px; height: 100px; margin: 5px;" controls><source src="/media_file_all/{index}" type="video/{ext[1:]}"></video>'
             else:
-                html += f'<img class="media" style="left: {hole["x_px"] - hole["w_px"]/2}px; top: {hole["y_px"] - hole["h_px"]/2}px; width: {hole["w_px"]}px; height: {hole["h_px"]}px;" src="/media_file/{hole["id"]}">'
-    html += '<br><a href="/switch_mode/calibrate">Reconfigure Layout</a></body></html>'
+                thumb = f'<img id="thumb-{hole["id"]}" style="width: 100px; height: 100px; margin: 5px; object-fit: cover;" src="/media_file_all/{index}" alt="{filename}">'
+            html += f'<div id="hole-{hole["id"]}" style="text-align: center; margin: 10px;"><p>Hole {hole["id"]}</p>{thumb}<br><button id="bin-{hole["id"]}" onclick="deleteMedia({index})">Bin</button> <button id="rotate-{hole["id"]}" onclick="rotateMedia({index})">Rotate 90 Deg</button></div>'
+    html += '''
+    </div>
+    <h3>Uploaded Media ({len(media)} files)</h3>
+    <div style="display: flex; flex-wrap: wrap;">
+    '''
+    for i, filepath in enumerate(media[:20]):  # Show first 20 thumbnails
+        ext = os.path.splitext(filepath)[1].lower()
+        filename = os.path.basename(filepath)
+        if ext in ['.mp4', '.webm', '.ogg']:
+            html += f'<video style="width: 100px; height: 100px; margin: 5px;" controls><source src="/media_file_all/{i}" type="video/{ext[1:]}"></video>'
+        else:
+            html += f'<img style="width: 100px; height: 100px; margin: 5px; object-fit: cover;" src="/media_file_all/{i}" alt="{filename}">'
+    html += f'''</div><br><a href="/switch_mode/calibrate">Reconfigure Layout</a>
+    <script>
+    let mediaLength = {len(media)};
+    function deleteMedia(index) {{
+        if (confirm('Delete this media?')) {{
+            fetch(`/delete_media/${{index}}`).then(() => location.reload());
+        }}
+    }}
+    function rotateMedia(index) {{
+        fetch(`/rotate_media/${{index}}`).then(() => location.reload());
+    }}
+    function updateFrames() {{
+        fetch('/current_indices')
+        .then(r => r.json())
+        .then(indices => {{
+            for (let holeId in indices) {{
+                let index = indices[holeId];
+                if (index < mediaLength) {{
+                    let thumb = document.getElementById('thumb-' + holeId);
+                    if (thumb.tagName === 'IMG') {{
+                        thumb.src = '/media_file_all/' + index;
+                    }} else if (thumb.tagName === 'VIDEO') {{
+                        thumb.querySelector('source').src = '/media_file_all/' + index;
+                        thumb.load();
+                    }}
+                    document.getElementById('bin-' + holeId).onclick = () => deleteMedia(index);
+                    document.getElementById('rotate-' + holeId).onclick = () => rotateMedia(index);
+                }}
+            }}
+        }});
+    }}
+    setInterval(updateFrames, 5000);
+    </script>
+    </body></html>'''
     return html
+
+@app.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    session.pop('username', None)
+    return redirect(url_for('login'))
 
 @app.route('/media_file/<int:hole_id>')
 def media_file(hole_id):
@@ -356,12 +481,72 @@ def media_file(hole_id):
         return send_file(media[hole_id])
     return '', 404
 
+@app.route('/media_file_all/<int:index>')
+def media_file_all(index):
+    if 0 <= index < len(media):
+        return send_file(media[index])
+    return '', 404
+
+@app.route('/delete_media/<int:index>')
+def delete_media(index):
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+    if 0 <= index < len(media):
+        filepath = media[index]
+        # remove from db
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute('DELETE FROM media WHERE filepath = ?', (filepath,))
+        conn.commit()
+        conn.close()
+        # remove file
+        if os.path.exists(filepath):
+            os.remove(filepath)
+        load_media()
+    return '', 204
+
+@app.route('/rotate_media/<int:index>')
+def rotate_media(index):
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+    if 0 <= index < len(media):
+        filepath = media[index]
+        # load image
+        img = Image.open(filepath)
+        img = img.rotate(-90, expand=True)  # rotate 90 deg clockwise
+        img.save(filepath)
+        # update db rotation to 0
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute('UPDATE media SET rotation = 0 WHERE filepath = ?', (filepath,))
+        conn.commit()
+        conn.close()
+    return '', 204
+
+@app.route('/current_indices')
+def current_indices():
+    if not session.get('logged_in'):
+        return redirect(url_for('login'))
+    return json.dumps(current_image_index)
+
 def run_display():
+    global current_image_index, current_hole_to_update, last_cycle_time
+
     pygame.init()
     screen = pygame.display.set_mode((screen_width_px, screen_height_px), pygame.FULLSCREEN)
     pygame.display.set_caption("80s TV Frame Display")
     clock = pygame.time.Clock()
     font = pygame.font.SysFont(None, 36)
+
+    # Generate QR code
+    local_ip = get_local_ip()
+    url = f"http://{local_ip}:8000"
+    qr = qrcode.QRCode(version=1, box_size=10, border=5)
+    qr.add_data(url)
+    qr.make(fit=True)
+    qr_img = qr.make_image(fill='black', back_color='white').convert('RGB')
+    qr_surface = pygame.image.fromstring(qr_img.tobytes(), qr_img.size, 'RGB')
+    qr_surface = pygame.transform.scale(qr_surface, (100, 100))  # Scale to 100x100
 
     while True:
         for event in pygame.event.get():
@@ -393,16 +578,37 @@ def run_display():
                 screen.blit(text, (x - w/2 + 5, y - h/2 + 5))
 
         elif display_mode == 'media':
+            # Cycle one frame every 5 seconds, picking random images
+            global current_image_index, current_hole_to_update, last_cycle_time
+            now = datetime.now()
+            if media and (now - last_cycle_time).seconds >= 5:
+                hole_id = holes[current_hole_to_update]['id']
+                current_image_index[hole_id] = random.randint(0, len(media)-1)
+                current_hole_to_update = (current_hole_to_update + 1) % len(holes)
+                last_cycle_time = now
             # Draw media
             for hole in holes:
-                if hole['id'] in media:
-                    filepath = media[hole['id']]
+                if media:
+                    index = current_image_index[hole['id']]
+                    filepath = media[index]
                     try:
                         img = pygame.image.load(filepath)
-                        img = pygame.transform.scale(img, (int(hole['w_px']), int(hole['h_px'])))
-                        screen.blit(img, (hole['x_px'] - hole['w_px']/2, hole['y_px'] - hole['h_px']/2))
+                        img_w, img_h = img.get_size()
+                        hole_w, hole_h = int(hole['w_px']), int(hole['h_px'])
+                        # Calculate scale to fit while keeping aspect ratio
+                        scale = min(hole_w / img_w, hole_h / img_h)
+                        new_w = int(img_w * scale)
+                        new_h = int(img_h * scale)
+                        img_scaled = pygame.transform.scale(img, (new_w, new_h))
+                        # Center in hole
+                        x = hole['x_px'] - hole_w / 2 + (hole_w - new_w) / 2
+                        y = hole['y_px'] - hole_h / 2 + (hole_h - new_h) / 2
+                        screen.blit(img_scaled, (x, y))
                     except:
                         pass  # Skip if can't load
+
+        # Draw QR code at bottom left
+        screen.blit(qr_surface, (10, screen_height_px - 110))
 
         pygame.display.flip()
         clock.tick(30)
