@@ -15,3 +15,15 @@
 - [x] Implement user management system: Add JSON-based user storage, admin user creation, disable default config login after adding users, use session username for uploads.
 
 - [x] Add calibration commit functionality: Allow committing calibration to switch to media mode, save mode to config, redirect login to media mode by default with option to reconfigure layout.
+
+- [x] Create run.sh script to start the Flask app and Pygame display.
+
+- [x] Implement random image cycling: Initialize with random images and cycle to random images every 5 seconds instead of sequential.
+
+- [x] Add current frames display in media page with Bin and Rotate 90 Deg buttons for each hole.
+
+- [x] Add auto-update to media page: Poll server every 5 seconds to update thumbnails without refresh.
+
+- [x] Improve media page for phone use: Hide upload form behind button, use landscape orientation, display TV layout with holes positioned, add touch gestures for long press + drag to delete (up), rotate left (left), rotate right (right), further options (down).
+
+- [x] Fix login by setting default password hash and removing conflicting users.json.
